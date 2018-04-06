@@ -1,0 +1,82 @@
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=WARN
+               -Dorg.slf4j.simpleLogger.showDateTime=true -Djava.awt.headless=true"
+  MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version -DinstallAtEnd=true -DdeployAtEnd=true -s /tmp/.gitlab-maven-settings.xml"
+  SPRING_DATASOURCE_URL: jdbc:postgresql://postgis:5432/intersection-topology-test
+  POSTGRES_DB: intersection-topology-test
+  POSTGRES_USER: topotopotest
+  POSTGRES_PASSWORD: topotopotest
+
+image: olivia003.itt.intravialis.nl:5000/library/vtc-ci:1.8.0_141
+
+cache:
+  key: "$CI_COMMIT_REF_NAME"
+  paths:
+    - target
+    - .m2/repository
+    - /root/.sonar/cache
+  
+services:
+  - docker:dind
+
+stages:
+  - build
+  - test
+  - code_quality
+  - deploy
+  - deploy_openshift
+
+job_build:
+  stage: build
+  script:
+    - 'rm -rf .m2/repository/com/vialis/vivaldi2/vi/parent'
+    - 'mvn $MAVEN_CLI_OPTS -U clean compile'
+
+job_test:
+  stage: test
+  services:
+    - name: mdillon/postgis:9.5
+      alias: postgis
+  script:
+    - 'mvn $MAVEN_CLI_OPTS verify'
+  artifacts:
+    paths:
+      - ./service/target/surefire-reports/*
+    expire_in: 7 days
+
+job_sonar:
+  stage: code_quality
+  allow_failure: true
+  dependencies:
+    - job_test
+  only:
+    - develop
+    - master
+  cache:
+   policy: pull
+  script:
+    - 'mvn $MAVEN_CLI_OPTS -Psonar clean compile sonar:sonar -Dsonar.host.url=$SONAR_URL -Dsonar.login=$SONAR_TOKEN'
+
+job_deploy_artifacts:
+  stage: deploy
+  only:
+    - develop
+    - master
+  cache:
+    policy: pull
+  script:
+    - 'echo "192.168.230.223  olivia003.itt.intravialis.nl" >> /etc/hosts'
+    - 'mvn $MAVEN_CLI_OPTS -Dmaven.test.skip -Drevision=$CI_PIPELINE_ID deploy'
+    - 'mvn $MAVEN_CLI_OPTS -Pdocker -Dmaven.test.skip -Dmaven.deploy.skip -Drevision=$CI_PIPELINE_ID deploy -f service/pom.xml'
+
+job_deploy_openshift:
+  stage: deploy_openshift
+  dependencies:
+    - job_deploy_artifacts
+  only:
+    - develop
+  script:
+    - 'oc login $OPENSHIFT_URL --token=$OPENSHIFT_TOKEN --insecure-skip-tls-verify'
+    - 'oc version'
+    - 'oc scale dc intersection-topology-service --replicas=0'
+    - 'oc scale dc intersection-topology-service --replicas=1'
